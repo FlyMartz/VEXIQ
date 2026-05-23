@@ -1147,19 +1147,25 @@ async function runAI(g){
 
   let ai=null, apiErr=null;
   try{
-    // corsproxy.io bypasses CORS for Firefox/local files
-    const PROXY="https://api.anthropic.com/v1/messages";
-    const r=await fetch(PROXY,{
-      method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":CLAUDE_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-allow-browser":"true"},
-      body:JSON.stringify({
-        model:"claude-sonnet-4-20250514",
-        max_tokens:2500,
-        tools:[{type:"web_search_20250305",name:"web_search"}],
-        messages:[{role:"user",content:prompt}]
-      })
-    });
-    const d=await r.json();
+    const ANTHROPIC="https://api.anthropic.com/v1/messages";
+    const body=JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2500,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]});
+    const headers={"Content-Type":"application/json","x-api-key":CLAUDE_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-allow-browser":"true"};
+    // Try direct, then proxy
+    let d=null;
+    const proxies=[
+      ()=>fetch(ANTHROPIC,{method:"POST",headers,body}),
+      ()=>fetch("https://corsproxy.io/?url="+encodeURIComponent(ANTHROPIC),{method:"POST",headers:{"Content-Type":"application/json","x-api-key":CLAUDE_KEY,"anthropic-version":"2023-06-01"},body}),
+      ()=>fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(ANTHROPIC),{method:"POST",headers,body}),
+    ];
+    for(const p of proxies){
+      try{
+        const r=await p();
+        const j=await r.json();
+        if(j.error&&j.error.type==="error")throw new Error(j.error.message);
+        if(j.content){d=j;break;}
+      }catch(pe){continue;}
+    }
+    if(!d)throw new Error("All connection attempts failed");
     if(d.error)throw new Error(d.error.message);
     const raw=(d.content||[]).map(x=>x.type==="text"?x.text:"").filter(Boolean).join("").trim();
     const m=raw.match(/\{[\s\S]*\}/);
