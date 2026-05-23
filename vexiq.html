@@ -1255,6 +1255,32 @@ async function runAI(g){
     '<button class="mb mb-x" onclick="closeAI()">CLOSE</button></div>';
 
   document.getElementById("ai-body").innerHTML=html;
+
+  // Update the game card confidence with the real AI score
+  const card=document.getElementById("c-"+g.id);
+  if(card){
+    const confNum=card.querySelector(".conf-block .conf-num, [style*='font-size:22px']");
+    const confBar=card.querySelector(".conf-fg");
+    const cardBorder=score>=75?"#00E676":score>=62?"#00E5FF":score>=48?"#FFAB40":"#FF3D5A";
+    const cardBorderLight=score>=75?"#00E67666":score>=62?"#00E5FF66":score>=48?"#FFAB4066":"#FF3D5A66";
+    // Update border color
+    card.style.borderColor=cardBorderLight;
+    card.style.boxShadow="0 0 22px "+cardBorderLight;
+    // Update confidence bar
+    if(confBar){confBar.style.width=score+"%";confBar.style.background=cardBorder;}
+    // Update confidence number
+    const allText=card.querySelectorAll("*");
+    allText.forEach(el=>{
+      if(el.children.length===0&&el.textContent.trim().match(/^\d+%$/)&&parseInt(el.textContent)>30){
+        el.textContent=score+"%";
+        el.style.color=cardBorder;
+      }
+    });
+    // Update top bar
+    card.style.setProperty("--card-top",cardBorder);
+    const topBar=card.querySelector("div[style*='height:3px']");
+    if(topBar)topBar.style.background=cardBorder;
+  }
 }
 // ── TRACKER ─────────────────────────────────────────────────────
 function openPickModal(pre){
