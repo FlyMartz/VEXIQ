@@ -1077,14 +1077,14 @@ async function runAI(g){
     '<div class="ai-load"><div class="spin" style="font-size:22px">&#x25D0;</div>'+
     '<div style="margin-top:12px;font-size:10px">Buscando datos en tiempo real...</div>'+
     '<div style="font-family:JetBrains Mono,monospace;font-size:8px;color:var(--txt3);margin-top:7px;line-height:2">'+
-    (isMLB?"Pitchers del día · Bullpen L3 · Récord L10 · Serie":isNBA?"Injury report · B2B · Récord L10":"Portero · Récord L10 · Special teams")+
+    (isMLB?"Analizando con IA · Pitching · Situacional · Ya Le Toca":isNBA?"Analizando matchup · Lesiones · Descanso":"Analizando portero · Récord · Lines especiales")+
     '</div></div>';
 
   const gDate=new Date(g.commence_time).toLocaleDateString("en-US",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
   const away=g.away_team,home=g.home_team;
 
   const sportLines=isMLB?[
-    "MANDATORY SEARCHES:",
+    "ANALYZE BASED ON YOUR BASEBALL KNOWLEDGE:",
     "1. "+sharp+" starting pitcher today MLB 2026",
     "2. "+weak+" starting pitcher today MLB 2026",
     "3. "+sharp+" bullpen usage last 3 days 2026",
@@ -1101,7 +1101,7 @@ async function runAI(g){
     "B3_SERIES (0-100): Game 2 or 3? Previous result? Sweep rate 28%. 80+=sharp lost G1 | 65=tied | 50=G1 | 30-=sharp won G1.",
     "B3_SITUATIONAL (0-100): 3rd game 3 nights? Travel? Division rival? Playoffs? Base=50 +12 favorable -12 negative."
   ]:isNBA?[
-    "MANDATORY SEARCHES:",
+    "ANALYZE BASED ON YOUR BASEBALL KNOWLEDGE:",
     "1. "+away+" "+home+" injury report today NBA 2026",
     "2. "+sharp+" last 10 games NBA 2026",
     "3. "+away+" "+home+" back to back schedule 2026",
@@ -1113,7 +1113,7 @@ async function runAI(g){
     "B3_SERIES (0-100): Division? Revenge? H2H?",
     "B3_SITUATIONAL (0-100): Home/away record, travel, playoffs."
   ]:[
-    "MANDATORY SEARCHES:",
+    "ANALYZE BASED ON YOUR BASEBALL KNOWLEDGE:",
     "1. "+sharp+" starting goalie confirmed today NHL 2026",
     "2. "+weak+" starting goalie today NHL 2026",
     "3. "+sharp+" last 10 games NHL 2026",
@@ -1140,24 +1140,42 @@ async function runAI(g){
     "",
     ...sportLines,
     "",
-    "RULES: Score=50 + reason=DATA NOT FOUND if no real data. Ya Le Toca needs actual L10. Include bet size: PASS/0.5u/1u/1.5u/2u.",
+    "RULES:",
+    "1. Use your training knowledge about these teams - their recent form, typical roster, pitching rotations, historical patterns.",
+    "2. For Ya Le Toca: estimate based on team quality and typical variance patterns in MLB.",
+    "3. Be a sharp bettor - use real baseball knowledge, not guesses.",
+    "4. Include bet size: PASS/0.5u/1u/1.5u/2u.",
+    "5. If genuinely uncertain about a factor, score 50.",
     "",
     'JSON ONLY: {"b2_f1":0,"b2_f2":0,"b2_f3":0,"b3_yatoca":0,"b3_series":0,"b3_situational":0,"b2_f1_label":"","b2_f2_label":"","b2_f3_label":"","b2_f1_reason":"","b2_f2_reason":"","b2_f3_reason":"","yatoca_reason":"","series_reason":"","situational_reason":"","analysis":""}'
   ].join("\n");
 
   let ai=null, apiErr=null;
   try{
-    // Cloudflare Worker proxy — handles CORS from any domain
-    const r=await fetch("https://dry-hill-6d94.mmgilaberte.workers.dev",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2500,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})
-    });
-    const d=await r.json();
-    if(d.error)throw new Error(d.error.message);
+    // Cloudflare Worker proxy
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),55000); // 55s timeout
+    let r;
+    try{
+      r=await fetch("https://dry-hill-6d94.mmgilaberte.workers.dev",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",
+          max_tokens:1500,
+          messages:[{role:"user",content:prompt}]
+        }),
+        signal:controller.signal
+      });
+    }finally{ clearTimeout(timeout); }
+    const txt=await r.text();
+    let d;
+    try{ d=JSON.parse(txt); }catch(e){ throw new Error("Worker response: "+txt.slice(0,200)); }
+    if(d.error)throw new Error(d.error.message||JSON.stringify(d.error));
+    if(!d.content)throw new Error("No content in response: "+JSON.stringify(d).slice(0,200));
     const raw=(d.content||[]).map(x=>x.type==="text"?x.text:"").filter(Boolean).join("").trim();
     const m=raw.match(/\{[\s\S]*\}/);
-    if(!m)throw new Error("No JSON in response");
+    if(!m)throw new Error("No JSON found. Claude said: "+raw.slice(0,300));
     ai=JSON.parse(m[0]);
   }catch(e){ apiErr=e.message||"Unknown error"; }
 
