@@ -722,6 +722,7 @@ let curSp    = "baseball_mlb";
 let curF     = "ALL";
 let arSecs=180, arLeft=180, arTick=null;
 const state  = {};
+const aiCache = {}; // stores AI results per game id
 
 const SPORTS = {
   baseball_mlb:        {label:"MLB",emoji:"⚾",key:"mlb",spreadLabel:"RUN LINE",totalLabel:"TOTAL",
@@ -836,6 +837,163 @@ async function loadAll(){
   state[curSp].games=process(body);
   renderAll();updSbar();updPOTD();
   document.getElementById("last-upd").textContent=`Updated: ${new Date().toLocaleTimeString()} · ${body.length} games`;
+  // Auto-analyze HIGH and MEDIUM signal games
+  autoAnalyze(state[curSp].games.filter(g=>["HIGH","MEDIUM"].includes(g.signal)));
+}
+
+async function autoAnalyze(games){
+  if(!games.length)return;
+  // Stagger requests to avoid rate limiting — 3 seconds apart
+  for(let i=0;i<games.length;i++){
+    const g=games[i];
+    if(aiCache[g.id])continue; // already analyzed
+    // Mark card as "analyzing"
+    const card=document.getElementById("c-"+g.id);
+    if(card){
+      const badge=card.querySelector(".ai-badge");
+      if(badge){badge.textContent="⚙ ANALYZING...";badge.style.color="var(--cyan)";}
+    }
+    await runAIAndUpdateCard(g);
+    if(i<games.length-1)await new Promise(r=>setTimeout(r,3000));
+  }
+}
+
+async function runAIAndUpdateCard(g){
+  const sp=SPORTS[curSp];
+  const isMLB=sp.key==="mlb",isNBA=sp.key==="nba",isNHL=sp.key==="nhl";
+  const sharp=g.signalSide==="HOME"?g.home_team:g.away_team;
+  const weak=g.signalSide==="HOME"?g.away_team:g.home_team;
+  const shML=g.signalSide==="HOME"?g.hML:g.aML;
+
+  const div=({HIGH:88,MEDIUM:65,LOW:42,REVERSE:80,CONFLICT:28,NONE:20})[g.signal]||20;
+  const mov=Math.min(100,Math.round(Math.abs((g.hML||0)-(g.hOpen||0))*3.2));
+  const con=({HIGH:85,REVERSE:78,MEDIUM:62,LOW:45,CONFLICT:20,NONE:30})[g.signal]||30;
+  const b1=Math.round((div*3+mov*2+con*2)/7);
+  const gDate=new Date(g.commence_time).toLocaleDateString("en-US",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
+  const away=g.away_team,home=g.home_team;
+
+  const sportLines=isMLB?[
+    "ANALYZE BASED ON YOUR BASEBALL KNOWLEDGE:",
+    "1. "+sharp+" starting pitcher today MLB 2026 — ERA, recent form, days rest",
+    "2. "+weak+" starting pitcher today MLB 2026 — ERA, recent form",
+    "3. "+sharp+" bullpen usage last 3 days",
+    "4. "+sharp+" last 10 games record and current streak",
+    "5. "+away+" vs "+home+" series context 2026",
+    "",
+    "BLOCK 2 — PITCHING & BULLPEN:",
+    "B2_F1 STARTING PITCHER (0-100): Compare SP quality both sides. 90+=ace vs weak | 50=neutral | 20-=weak vs ace.",
+    "B2_F2 BULLPEN STATUS (0-100): Estimated bullpen fatigue. 80+=sharp rested rival taxed | 50=similar | 20-=sharp overworked.",
+    "B2_F3 PITCHER SPLITS (0-100): Home/away context advantage. 80+=clearly better | 50=neutral.",
+    "",
+    "BLOCK 3 — SITUATIONAL:",
+    "B3_YATOCA YA LE TOCA (0-100): "+sharp+" last 10 record and streak. 7+ losses=90+ | 5-6=80 | 2-8 L10=72 | 3-7=62 | 4-6=50 | hot streak=20-35.",
+    "B3_SERIES (0-100): Series context. 80+=sharp lost G1 | 65=tied | 50=G1 | 30-=sharp won G1.",
+    "B3_SITUATIONAL (0-100): Travel, fatigue, division rival, playoff race. Base=50 ±12 per factor."
+  ]:isNBA?[
+    "ANALYZE BASED ON YOUR NBA KNOWLEDGE:",
+    "B2_F1 INJURIES (0-100): Key player availability both teams.",
+    "B2_F2 REST/B2B (0-100): Rest advantage. 85+=sharp rested rival B2B.",
+    "B2_F3 MATCHUP (0-100): Style and pace advantage.",
+    "B3_YATOCA (0-100): "+sharp+" last 10 and streak.",
+    "B3_SERIES (0-100): Division/rivalry/revenge context.",
+    "B3_SITUATIONAL (0-100): Home/away, travel, playoff stakes."
+  ]:[
+    "ANALYZE BASED ON YOUR NHL KNOWLEDGE:",
+    "B2_F1 GOALIE (0-100): Goalie matchup quality.",
+    "B2_F2 SPECIAL TEAMS (0-100): PP% and PK% advantage.",
+    "B2_F3 REST (0-100): Rest and schedule advantage.",
+    "B3_YATOCA (0-100): "+sharp+" last 10 and streak.",
+    "B3_SERIES (0-100): Division/points race context.",
+    "B3_SITUATIONAL (0-100): Home ice, fatigue, motivation."
+  ];
+
+  const prompt=[
+    "You are VEXIQ — professional sharp bettor. Analyze concisely.",
+    "GAME: "+away+" @ "+home+" | "+gDate,
+    "ML: Away "+fml(g.aML)+" Home "+fml(g.hML)+" | Signal: "+g.signal+" | Sharp: "+sharp,
+    "B1 fixed: Div="+div+" Move="+mov+" Consensus="+con+" → "+b1+"/100",
+    "",...sportLines,"",
+    "Be concise. Use knowledge. Score 50 if uncertain.",
+    'JSON: {"b2_f1":0,"b2_f2":0,"b2_f3":0,"b3_yatoca":0,"b3_series":0,"b3_situational":0,"b2_f1_label":"","b2_f2_label":"","b2_f3_label":"","b2_f1_reason":"","b2_f2_reason":"","b2_f3_reason":"","yatoca_reason":"","series_reason":"","situational_reason":"","analysis":""}'
+  ].join("\n");
+
+  try{
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),55000);
+    let r;
+    try{
+      r=await fetch("https://dry-hill-6d94.mmgilaberte.workers.dev",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:"claude-sonnet-4-5",max_tokens:1500,messages:[{role:"user",content:prompt}]}),
+        signal:controller.signal
+      });
+    }finally{clearTimeout(timeout);}
+    const txt=await r.text();
+    let d;
+    try{d=JSON.parse(txt);}catch(e){return;}
+    if(d.error||!d.content)return;
+    const raw=(d.content||[]).map(x=>x.type==="text"?x.text:"").filter(Boolean).join("").trim();
+    const m=raw.match(/\{[\s\S]*\}/);
+    if(!m)return;
+    const ai=JSON.parse(m[0]);
+
+    const cl=v=>Math.min(100,Math.max(0,parseInt(v)||50));
+    const vars=[
+      {s:div,w:3},{s:mov,w:2},{s:con,w:2},
+      {s:cl(ai.b2_f1),w:3},{s:cl(ai.b2_f2),w:2},{s:cl(ai.b2_f3),w:2},
+      {s:cl(ai.b3_yatoca),w:3},{s:cl(ai.b3_series),w:2},{s:cl(ai.b3_situational),w:2},
+    ];
+    const totalW=vars.reduce((s,v)=>s+v.w,0);
+    const score=Math.round(vars.reduce((s,v)=>s+v.s*v.w,0)/totalW);
+    const rec=score>=75?"STRONG BET":score>=62?"LEAN":score>=48?"MONITOR":"PASS";
+
+    // Store in cache
+    aiCache[g.id]={ai,score,rec,vars};
+
+    // Update the card
+    updateCardWithScore(g.id,score,rec);
+
+  }catch(e){ /* silent fail for auto-analysis */ }
+}
+
+function updateCardWithScore(gameId, score, rec){
+  const card=document.getElementById("c-"+gameId);
+  if(!card)return;
+  const col=score>=75?"#00E676":score>=62?"#00E5FF":score>=48?"#FFAB40":"#FF3D5A";
+  const colLight=col+"55";
+
+  // Update border and shadow
+  card.style.borderColor=colLight;
+  card.style.boxShadow="0 0 22px "+col+"12";
+
+  // Update top bar
+  const topBar=card.querySelector("div[style*='height:3px']");
+  if(topBar)topBar.style.background=col;
+
+  // Update confidence bar
+  const confBar=card.querySelector(".conf-fg");
+  if(confBar){confBar.style.width=score+"%";confBar.style.background=col;}
+
+  // Update confidence number
+  card.querySelectorAll("*").forEach(el=>{
+    if(el.children.length===0&&el.textContent.trim().match(/^\d+%$/)&&parseInt(el.textContent)>20&&parseInt(el.textContent)<=100){
+      el.textContent=score+"%";
+      el.style.color=col;
+    }
+  });
+
+  // Update AI badge to show analyzed status + recommendation
+  const badge=card.querySelector(".ai-badge");
+  if(badge){
+    const recColors={["STRONG BET"]:"#00E676",LEAN:"#00E5FF",MONITOR:"#FFAB40",PASS:"#FF3D5A"};
+    badge.textContent="✓ "+rec;
+    badge.style.color=recColors[rec]||col;
+    badge.style.background=recColors[rec]+"15"||col+"15";
+    badge.style.border="1px solid "+(recColors[rec]||col)+"40";
+    badge.style.borderRadius="4px";
+    badge.style.padding="2px 7px";
+  }
 }
 
 function loadDemo(){
@@ -1018,7 +1176,7 @@ function cardHTML(g,sp){
     </div>
     <div class="narr">${esc(g.insight||g.narrative)}</div>
     <div class="cacts">
-      <button class="ab ab-ai" onclick="openAI('${g.id}')">🤖 AI ANALYSIS</button>
+      <button class="ab ab-ai" onclick="openAI('${g.id}')">🤖 AI ANALYSIS</button><span class="ai-badge" style="font-family:JetBrains Mono,monospace;font-size:7px;color:var(--txt3);align-self:center;margin-left:2px">${["HIGH","MEDIUM"].includes(g.signal)?"⏳ pending":""}</span>
       <button class="ab ab-tr" onclick="qPick('${g.id}')">+ TRACK PICK</button>
       <button class="ab ab-pt" onclick="setPOTD('${g.id}')">⭐ POTD</button>
       <button class="ab ab-tg" onclick="shareTG('${g.id}')">📨 TG</button>
@@ -1257,6 +1415,7 @@ async function runAI(g){
   document.getElementById("ai-body").innerHTML=html;
 
   // Update the game card confidence with the real AI score
+  if(aiCache[g.id]===undefined)aiCache[g.id]={score}; // mark as analyzed
   const card=document.getElementById("c-"+g.id);
   if(card){
     const confNum=card.querySelector(".conf-block .conf-num, [style*='font-size:22px']");
